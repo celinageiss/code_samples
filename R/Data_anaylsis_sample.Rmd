@@ -1,0 +1,406 @@
+---
+title: "Data analysis sample"
+author: "Celina Geiss"
+date: "`r Sys.Date()`"
+output:
+  github_document:
+    toc: true
+---
+
+```{r knitr config, include=FALSE, cache = FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(dpi = 300)
+knitr::opts_chunk$set(fig.align = "center")
+
+# save all figures of the Rmd as png and pdf in the figures directory
+figure_directory = "Data_analysis_sample/"
+if (!dir.exists(figure_directory)) dir.create(figure_directory)
+knitr::opts_chunk$set(dev = c("png", "pdf"), fig.path = figure_directory)
+```
+
+
+Here, we will investigate the effect of the organellar Ca2+ regulator protein (OCaR2) on $\beta$-adrenergic induced cardiac stress. The data comprises bulk RNA-seq counts of WT and KO mice treated either with isoproterenol, a $\beta$-adrenoreceptor agonist, and saline as control conditions. KO-iso mice display fatal ventricular arrhythmia a couple of days after stimulation. We therefore want to elucidate which compensating processes are deranged by the abscence of OCaR2.
+
+In this script we will apply a linear model to dissect the effects of genotype, treatment and the interaction of both (KO-iso) and enrich the associated genes in regard to pathways and transcription factor activity.
+
+
+# Setup
+
+## Libraries
+
+```{r Libraries, message=FALSE, cache=FALSE}
+# Standard libraries
+library(here)
+source(here("R", "standard_libs.R"))
+
+# Main libraries
+library(cowplot)
+library(limma)
+library(fgsea)
+library(progeny)
+library(dorothea)
+library(pheatmap)
+library(ggrepel)
+
+source(here("R", "support_functions_OCaR2.R"))
+source(here("R", "support_functions_transcriptutorial.R"))
+source(here("R", "colour_scheme.R"))
+```
+
+## Data
+
+```{r Load_data, message=FALSE, cache=FALSE}
+# Filtered & VSN normalised counts
+counts_vsn <- read_rds(here("Data", "data_processed", "counts.OCaR-IsoT_filtered_&_normalised.rds"))
+counts_vsn
+
+# Targets table
+targets <- read_rds(here("Data", "data_processed", "targets.OCaR-IsoT.rds"))
+targets
+
+# Load gene sets for GSEA
+source(here("R", "import_gene_sets.R"))
+```
+
+Let's first take a look at the distribution of the filtered and normalised counts:
+
+```{r Inspect_data, cache=FALSE}
+dlookr::diagnose_numeric(counts_vsn)
+
+plot_violins(counts_vsn, targets, "Filtered & normalised log2(counts)")
+```
+
+# Linear model
+
+We want to build a linear regression model to dissect the contribution of each condition to each gene.
+
+$$\text{GEX} = \beta_1 + \beta_2 \cdot \text{KO} + \beta_3 \cdot \text{Iso} + \beta_4 \cdot \text{KO-Iso}$$
+
+The $\beta$ values are the coefficients for each condition, representing the weight or extent by which a gene changes. $\beta_0$ is the intercept, meaning the base condition (WT-saline).
+
+Since we have genotype and treatment observations, this corresponds a 2x2 factorial design interaction model (see chapter 9.5 in [limma user guide](https://www.bioconductor.org/packages/release/bioc/vignettes/limma/inst/doc/usersguide.pdf)).
+
+## Design
+
+```{r Design}
+Genotype_ <- factor(targets$genotype, levels = c("WT", "KO"))
+Treatment_ <- factor(targets$treatment, levels = c("saline", "iso"))
+
+design_matrix <- model.matrix(~ Genotype_*Treatment_)
+design_matrix
+```
+
+We can interpret the `design_matrix` as follows:
+
+| $\beta$ | Coefficient                  | Comparison                                  | Interpretation               |
+|---------|------------------------------|---------------------------------------------|------------------------------|
+| 1       | `(Intercept)`                | WT-saline                                   | null/control condition       |
+| 2       | `Genotype_KO`                | KO-saline - WT-saline                       | basic effect of KO on saline |
+| 3       | `Treatment_iso `             | WT-iso - WT-saline                          | basic effect of iso on WT    |
+| 4       | `Genotype_KO:Treatment_iso`  | (KO-iso - KO-saline) - (WT-iso - WT-saline) | combined effect of KO & iso  |
+
+The KO-iso effect is not directly represented, but we can extract it as the sum of coefficients 3 + 4.
+
+With the coefficients we get the following combinations, each representing the mean of one condition: 
+
+- (1 1 1 1): WT-saline
+- (1 1 0 0): WT-iso
+- (1 0 1 0): KO-saline
+- (1 0 0 0): KO-iso
+
+
+
+## Fit
+
+Now we fit the model to our gene expression data. The function `eBayes()` calculates the empirical Bayes statistics of differentially expressed genes:
+
+  - `logFC`: log2-fold change
+  - `AveExpr`: average log2 expression level across all experiments
+  - `t`: moderated t-statistic (like ordinary t-statistic, but standard errors across genes)
+  - `P.Value` and `adj.P.Value`: associated p-value and adjustment for multiple testing (default: BH/FDR)
+  - `lods` or `B`: B-statistic, log-odds that gene is differentially expressed
+  - `F`: moderated F-statistics (tests, if a gene is differentially expressed in any contrast)
+
+```{r Model_fit}
+counts_df <- counts_vsn %>% select(-gene) %>% column_to_rownames(var ="ensembl")
+lm_fit <- lmFit(counts_df, design_matrix) %>% eBayes()
+```
+
+## Model results
+
+When we want to summarise the results of the model we can use some limma-provided functions:
+
+- `decideTests()`: identify significantly DEGs
+- `topTable()`: shows the n top genes of a selected contrast
+
+```{r Results_LM, fig.height=7}
+lm_results <- decideTests(lm_fit, adjust.method = "BH") 
+summary(lm_results)
+
+vennDiagram(lm_results, cex = 1, include = c("up", "down"))
+```
+
+### Coefficients
+
+```{r Top_genes_coef}
+# Genotype-associated genes
+top_genotype <- topTable(lm_fit, coef = "Genotype_KO", number = Inf, adjust.method = "BH") %>%
+  rownames_to_column("ensembl") %>% 
+  as_tibble() %>% 
+  annotate_GO_description()
+  
+top_genotype_filtered <- top_genotype %>% filter(adj.P.Val < 0.15)
+
+# Treatment-associated genes
+top_treatment <- topTable(lm_fit, coef = "Treatment_iso", number = Inf, adjust.method = "BH") %>%
+  rownames_to_column("ensembl") %>% 
+  as_tibble() %>% 
+  annotate_GO_description()
+
+top_treatment_filtered <- top_treatment %>% filter(adj.P.Val < 0.15)
+
+# Interaction-associated genes
+top_interaction <- topTable(lm_fit, coef = "Genotype_KO:Treatment_iso", number = Inf, adjust.method = "BH") %>%
+  rownames_to_column("ensembl") %>% 
+  as_tibble() %>% 
+  annotate_GO_description() 
+
+top_interaction_filtered <- top_interaction %>% filter(adj.P.Val < 0.15)
+```
+
+#### Unique genes
+
+We can see that several genes appear in the top list of several conditions. We now want to find out which genes are unique to the genotype and treatment and do not occur in the interaction. 
+
+```{r Extract_unique_genes}
+top_genotype_unique <- top_genotype %>% 
+  filter(ensembl %in% setdiff(top_genotype_filtered$ensembl,
+                              top_interaction_filtered$ensembl))
+
+top_treatment_unique <- top_treatment %>% 
+  filter(ensembl %in% setdiff(top_treatment_filtered$ensembl,
+                              top_interaction_filtered$ensembl))
+```
+
+
+
+#### Boxplot of top genes
+
+```{r Boxplot_top_genes, cache=FALSE, fig.height=12, fig.width=10}
+make_boxplots_top_genes(slice(top_genotype_unique, 1:25), "genotype", "Genotype effect", colours_iso)
+make_boxplots_top_genes(slice(top_treatment_unique, 1:25), "treatment", "Treatment effect", colours_iso)
+make_boxplots_top_genes(slice(top_interaction, 1:25), "treatment", "Interaction effect", colours_iso)
+```
+
+# Functional analyses
+
+## Gene set enrichment analysis
+
+The statistical enrichment of the expression data will give us a hint on the genotype- and tratment-affected pathways. As prior knowledge we use the hallmark pathway sets of the database [MSigDB](https://www.gsea-msigdb.org/gsea/msigdb/).
+
+```{r Function_run_GSEA}
+# Run function fsgea
+run_fsgea <- function(genesets, rank_table) {
+  gsea_genotype <- fgseaSimple(pathways = genesets,
+                               stats = rank_table,
+                               minSize = 15, 
+                               maxSize = 300,
+                               nperm = 1000) %>% 
+  as_tibble() %>% 
+  arrange(desc(abs(NES)))
+}
+
+ready4gsea <- function(rank_table) {
+  rank_table %>% 
+    select(gene, t) %>% 
+    distinct(gene, .keep_all = T) %>% 
+    deframe()
+}
+```
+
+```{r Function_GSEA_plot, include=FALSE}
+# Plot function
+make_GSEA_plot <- function(gsea_result, gene_set, label) {
+  # Filter GSEA results
+  gsea_filtered <- gsea_result %>%
+    filter(padj < 0.25) %>%
+    arrange(desc(abs(ES))) %>%
+    mutate(pathway = str_sub(pathway, 1, 50), 
+           dir = sign(ES))
+  
+  # Make plot
+  ggplot(gsea_filtered,
+       aes(ES, forcats::fct_reorder(pathway, ES), 
+           fill = factor(dir))) +
+  geom_bar(aes(fill = ES), stat = "identity") +
+  scale_fill_gradient2(low = colour_dn, high = colour_up,
+      mid = colour_mid, midpoint = 0) +
+  labs(title = label,
+       subtitle = paste("GSEA:", gene_set),
+       x = "ES", 
+       y = "") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(hjust = 1),
+        panel.grid.major = element_line(size = 0.3))
+}
+```
+
+
+```{r GSEA_hallmark_pathways}
+# Coefficients
+gsea_hallmark_genotype <- run_fsgea(gs_hallmark, ready4gsea(top_genotype))
+gsea_hallmark_treatment <- run_fsgea(gs_hallmark, ready4gsea(top_treatment))
+gsea_hallmark_interaction <- run_fsgea(gs_hallmark, ready4gsea(top_interaction))
+```
+
+```{r GSEA_hallmark_coefficients, cache=FALSE, fig.width = 7, fig.height=7}
+make_GSEA_plot(gsea_hallmark_genotype, 
+               "MSigDB hallmark gene sets", "Genotype effect")
+
+make_GSEA_plot(gsea_hallmark_treatment, 
+               "MSigDB hallmark gene sets", "Treatment effect")
+
+make_GSEA_plot(gsea_hallmark_interaction, 
+               "MSigDB hallmark gene sets", "Interaction effect")
+```
+
+## Pathway activity (PROGENy)
+
+[PROGENy](https://saezlab.github.io/progeny/) is a tool developed by the lab of Julio Saez-Rodriguez that infers the activities of 14 well-established pathways from the footprints gene expression. 
+
+```{r Function_run_PROGENy}
+run_progeny <- function(gene_matrix) {
+  progeny(gene_matrix, 
+          scale = F, organism = "Mouse", top = 100, perm = 10000, 
+          z_scores = TRUE) %>%
+    t() %>% 
+    as_tibble(rownames = "pathway")
+}
+```
+
+
+```{r Run_PROGENy, message=FALSE}
+t_val_coef <- full_join(top_genotype %>% select(gene, genotype = t),
+                        top_treatment %>% select(gene, treatment = t), by = "gene") %>% 
+  full_join(top_interaction %>% select(gene, interaction = t), by = "gene") %>% 
+  drop_na()
+
+t_val_coef_matrix <- t_val_coef %>% 
+  distinct(gene, .keep_all = TRUE) %>% 
+  column_to_rownames(var = "gene") %>% 
+  as.matrix()
+
+progeny_activity_coef <- run_progeny(t_val_coef_matrix)
+```
+
+```{r Function_barplot_PROGENy, include=FALSE}
+plot_pathway_activity <- function(PathwayActivity_zscore, comparison, label) {
+  ggplot(PathwayActivity_zscore %>% 
+           select(pathway, t_val = matches(comparison)) %>% 
+           mutate(pathway = factor(pathway)),
+       aes(x = t_val, y = reorder(pathway, t_val))) + 
+    geom_bar(aes(fill = t_val), stat = "identity") +
+    # scale_fill_gradient2(low = "darkblue", high = "indianred",
+    #     mid = "whitesmoke", midpoint = 0) +
+    scale_fill_gradient2(low = colour_dn, high = colour_up,
+        mid = colour_mid, midpoint = 0) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(size = 12),
+          axis.text.x = element_text(hjust = 1, size =10),
+          axis.text.y = element_text(size =10),
+          panel.grid.major = element_line(size = 0.3)) +
+    labs(x = "NES", y = "") +
+    ggtitle("Pathway activity (PROGENy)", subtitle = label)
+}
+```
+
+
+```{r Barplot_PROGENy_coef, cache=FALSE, fig.width=5}
+progeny_plots_coef <- map(names(progeny_activity_coef)[2:4], function(coef) {
+  plot_pathway_activity(progeny_activity_coef %>% select(pathway, coef),
+                        coef,
+                        paste0(str_to_sentence(coef), " effect"))
+})
+
+progeny_plots_coef
+```
+
+## TF activity (DoRothEA)
+
+Similar to PROGENy, [DoRothEA](https://saezlab.github.io/dorothea/) infers transcription factor activities from the footprints of gene expression.
+
+```{r Load_DoRothEA, message=FALSE}
+# Load Dorothea Regulons
+data("dorothea_mm", package = "dorothea")
+regulons <- dorothea_mm %>%
+  dplyr::filter(confidence %in% c("A", "B","C"))
+```
+
+```{r Run_DoRothEA, message=FALSE}
+tf_activities_stat_coef <- dorothea::run_viper(t_val_coef_matrix, regulons,
+                                               options = list(minsize = 5, eset.filter = FALSE, 
+                                                           cores = 1, verbose = FALSE, nes = TRUE)) %>% 
+    as_tibble(rownames = "gene")
+```
+
+
+```{r Function_barplot_DoRothEA, include=FALSE}
+plot_TF_activity <- function(tf_activities_stat, comparison, label) {
+  
+  tf_activities_stat_top25 <- tf_activities_stat %>%
+    select(gene, NES = matches(comparison)) %>%
+    dplyr::top_n(25, wt = abs(NES)) %>%
+    dplyr::arrange(NES) %>% 
+    dplyr::mutate(gene = factor(gene))       
+
+  ggplot(tf_activities_stat_top25,aes(x = NES, y = reorder(gene, NES))) + 
+    geom_bar(aes(fill = NES), stat = "identity") +
+    # scale_fill_gradient2(low = "darkblue", high = "indianred", 
+    #     mid = "whitesmoke", midpoint = 0) + 
+    scale_fill_gradient2(low = colour_dn, high = colour_up,
+        mid = colour_mid, midpoint = 0) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold"),
+          axis.title = element_text(size = 12),
+          axis.text.x = element_text(hjust = 1, size =10),
+          axis.text.y = element_text(size =10),
+          panel.grid.major = element_line(size = 0.3)) +
+    labs(x = "NES", y = "")  +
+    ggtitle("TF activity (DoRothEA ABC)", subtitle = label)
+}
+```
+
+```{r Barplot_DoRothEA_coef, cache=FALSE, fig.height=6, fig.width=5}
+TF_activity_plots_coef <- map(names(tf_activities_stat_coef)[2:4], function(coef) {
+  plot_TF_activity(tf_activities_stat_coef %>% select(gene, coef),
+                   coef,
+                   paste0(str_to_sentence(coef), " effect"))
+})
+
+TF_activity_plots_coef
+```
+
+# Export results
+
+```{r Export_results, eval=FALSE}
+# Coefficient genes
+write_rds(top_genotype, here("Data", "data_processed", "IsoT_stats_genotype_effect.rds"))
+write_rds(top_treatment, here("Data", "data_processed", "IsoT_stats_treatment_effect.rds"))
+write_rds(top_interaction, here("Data", "data_processed", "IsoT_stats_interaction_effect.rds"))
+```
+
+------------------------------------------------------------------------
+
+# Session info
+
+```{r Session_info}
+devtools::session_info()
+```
