@@ -5,8 +5,8 @@ This repository contains code I wrote during some of my former projects at the G
 
 **R**
 
-- *Data_analysis_sample* ([Rmd](https://github.com/celinageiss/code_samples/blob/main/R/Data_anaylsis_sample.Rmd) | [md](https://github.com/celinageiss/code_samples/blob/main/R/Data_anaylsis_sample.md))  
-  This analysis pipeline is a part of my current master thesis project, in which I study the effect of the *organellar Ca2+ regulator protein 2 (OCaR2)* during beta-adrenergic induced cardiac arrhythmia in mice. To this end, I apply a linear intersection model on gene expression data and analyse pathways and transcription factor activity based on the model coefficients.
+- *Data_analysis_sample* (rendered version: [md](https://github.com/celinageiss/code_samples/blob/main/R/Data_anaylsis_sample.md) | source code: [Rmd](https://github.com/celinageiss/code_samples/blob/main/R/Data_anaylsis_sample.Rmd))  
+  This analysis pipeline is a part of my current master thesis project, in which I study the effect of the *organellar Ca2+ regulator protein 2 (OCaR2)* during beta-adrenergic induced cardiac arrhythmia in mice. To this end, I apply a linear interaction model on gene expression data and analyse pathways and transcription factor activity based on the model coefficients.
 
 - *plasmid_assembly_app.R* ([here](https://github.com/celinageiss/code_samples/blob/main/R/plasmid_assembly_app.R))  
   This R Shiny app was written to allow an interactive assembly of plasmids for high T cell receptor cloning. The user can choose between multiple building blocks for each plasmid module, filter the library for available pieces and eventually download a fasta file containing the permutations of all selected modules.
